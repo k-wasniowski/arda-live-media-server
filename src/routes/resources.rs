@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 use actix_web::{web, HttpResponse};
 use tokio::sync::Mutex;
 use webrtc::api::interceptor_registry::register_default_interceptors;
@@ -16,6 +17,8 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use serde_json::{Result, Value};
 use serde_json::json;
 use webrtc::data_channel::RTCDataChannel;
+use webrtc::track::track_remote::TrackRemote;
+use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 
 pub async fn resources(
     body: web::Bytes,
@@ -100,6 +103,50 @@ pub async fn resources(
         })
     }));
 
+    let pc = Arc::downgrade(&peer_connection);
+    peer_connection.on_track(Box::new(move |track, _| {
+        let video_track = track.unwrap();
+
+        let media_ssrc = video_track.ssrc();
+        let pc2 = pc.clone();
+        tokio::spawn(async move {
+            let mut result = Result::<usize>::Ok(0);
+
+            while result.is_ok() {
+                let rtp_packet = match video_track.read_rtp().await {
+                    Ok(packet) => packet,
+                    Err(_) => {
+                        panic!("Invalid!!");
+                    }
+                };
+
+                println!("Packet: {:?}", rtp_packet);
+            }
+
+            // while result.is_ok() {
+            //     let timeout = tokio::time::sleep(Duration::from_secs(3));
+            //     tokio::pin!(timeout);
+            //
+            //     tokio::select! {
+            //         _ = timeout.as_mut() =>{
+            //             if let Some(pc) = pc2.upgrade(){
+            //                 result = pc.write_rtcp(&[Box::new(PictureLossIndication{
+            //                     sender_ssrc: 0,
+            //                     media_ssrc,
+            //                 })]).await.map_err(Into::into);
+            //             }else {
+            //                 break;
+            //             }
+            //         }
+            //     };
+            // }
+        });
+
+        Box::pin(async move {
+            println!("On track received");
+
+        })
+    }));
 
     let remote_sdp = match serde_json::from_str::<RTCSessionDescription>(&sdp_json.to_string()) {
         Ok(x) => x,
