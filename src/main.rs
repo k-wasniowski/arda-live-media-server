@@ -1,5 +1,6 @@
 use std::net::TcpListener;
 use arda_live_media_server::configuration::get_configuration;
+use arda_live_media_server::media::{media_endpoints, media_observer};
 use arda_live_media_server::startup::run;
 use arda_live_media_server::telemetry::{get_subscriber, init_subscriber};
 use arda_live_media_server::webrtc_api::build_webrtc_api;
@@ -16,6 +17,8 @@ async fn main() -> std::io::Result<()> {
         Err(e) => { return Err(std::io::Error::new(std::io::ErrorKind::Other, "foo")); }
     };
 
+    let media_endpoints = media_endpoints::MediaEndpoints::new();
+
     let address = format!(
         "{}:{}",
         settings.application.host, settings.application.port
@@ -23,5 +26,5 @@ async fn main() -> std::io::Result<()> {
 
     let listener = TcpListener::bind(address)?;
 
-    run(listener, webrtc_api)?.await
+    run(listener, webrtc_api, media_endpoints)?.await
 }
