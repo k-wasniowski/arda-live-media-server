@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 use actix_web::{web, HttpResponse};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_VP8};
 use webrtc::api::{API, APIBuilder};
@@ -23,18 +23,16 @@ use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_local::{TrackLocal, TrackLocalWriter};
 use webrtc::util::Unmarshal;
-use crate::media::{IMediaObserver, MediaEndpoints, MediaObserver, MediaPublisher};
+use crate::media::{IMediaObserver, MediaResources, MediaObserver, LiveMediaStream};
 use webrtc::Error;
 
-pub async fn resources(
+pub async fn post_resources(
     body: web::Bytes,
     path: web::Path<String>,
     webrtc_api: web::Data<Arc<Mutex<API>>>,
-    media_endpoints_data: web::Data<Arc<Mutex<MediaEndpoints>>>,
+    media_endpoints_data: web::Data<Arc<Mutex<MediaResources>>>,
 ) -> HttpResponse {
     let sdp_str = String::from_utf8(Vec::from(body)).unwrap();
-
-    println!("{}", sdp_str);
 
     let api = webrtc_api.lock().await;
 
@@ -48,8 +46,6 @@ pub async fn resources(
         ..Default::default()
     };
 
-    let pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>> = Arc::new(Mutex::new(vec![]));
-
     let peer_connection_result = api.new_peer_connection(config).await;
     let peer_connection = Arc::new(match peer_connection_result {
         Ok(x) => x,
@@ -58,42 +54,31 @@ pub async fn resources(
         }
     });
 
-    let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(1);
-
     let sdp_json = json!({
         "type": "offer",
         "sdp": sdp_str,
     });
 
-    let pending_candidates2 = Arc::clone(&pending_candidates);
-    peer_connection.on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
-        println!("on_ice_candidate {:?}", c);
+    let mut media_endpoints_data_1 = media_endpoints_data.clone();
+    let resource_id = path.to_string();
+    peer_connection.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
+        println!("Peer Connection State has changed: {state}");
 
-        let pending_candidates3 = Arc::clone(&pending_candidates2);
+        let mut media_endpoints_data_2 = media_endpoints_data_1.clone();
+        let resource_id_1 = resource_id.clone();
         Box::pin(async move {
-            println!("Push new ice candidate - step 1");
+            let mut media_endpoints_data_3 = media_endpoints_data_2.clone();
+            let resource_id_2 = resource_id_1.clone();
 
-            if let Some(c) = c {
-                println!("Push new ice candidate - step 2");
+            match state {
+                RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed => {
+                    let media_endpoints = media_endpoints_data_3.lock().await;
 
-                let mut cs = pending_candidates3.lock().await;
-                cs.push(c);
+
+                }
+                _ => {}
             }
         })
-    }));
-
-    peer_connection.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
-        println!("Peer Connection State has changed: {s}");
-
-        if s == RTCPeerConnectionState::Failed {
-            // Wait until PeerConnection has had no network activity for 30 seconds or another failure. It may be reconnected using an ICE Restart.
-            // Use webrtc.PeerConnectionStateDisconnected if you are interested in detecting faster timeout.
-            // Note that the PeerConnection may come back from PeerConnectionStateDisconnected.
-            println!("Peer Connection has gone to failed exiting");
-            let _ = done_tx.try_send(());
-        }
-
-        Box::pin(async {})
     }));
 
     peer_connection.on_data_channel(Box::new(move |d: Arc<RTCDataChannel>| {
@@ -113,37 +98,26 @@ pub async fn resources(
         })
     }));
 
-    let media_publisher = MediaPublisher::new();
+    let live_media_stream = LiveMediaStream::new();
 
-    media_endpoints.media_endpoints.insert(String::from("aaaa"), media_publisher.clone());
-    let tr = peer_connection.get_transceivers().await;
+    //media_endpoints.media_endpoints.insert(path.to_string(), live_media_stream.clone());
 
-    let pc = Arc::downgrade(&peer_connection);
     peer_connection.on_track(Box::new(move |track, _| {
         let video_track = track.unwrap();
-        let media_publisher_2 = media_publisher.clone();
-        let media_ssrc = video_track.ssrc();
-        let pc2 = pc.clone();
+        let live_media_stream_1 = live_media_stream.clone();
 
         tokio::spawn(async move {
             let mut result = Result::<usize>::Ok(0);
 
-            let media_publisher_3 = media_publisher_2.clone();
+            let live_media_stream_2 = live_media_stream_1.clone();
 
             while result.is_ok() {
-                let mut buffer = vec![0u8; 1500];
-
                 let rtp_packet = video_track.read_rtp().await.unwrap();
 
-                let locked_media_publisher = media_publisher_3.lock().await;
+                let locked_live_media_stream = live_media_stream_2.lock().await;
 
-                for x in &locked_media_publisher.observers {
-                    println!("Writting");
-                    let video_track = &x.video_track;
-
-                    if let Err(err) = video_track.write_rtp(&rtp_packet.0).await {
-                        println!("video_track write err: {err}");
-                    }
+                for media_observer in &locked_live_media_stream.observers {
+                    media_observer.on_frame(&rtp_packet.0).await;
                 }
             }
         });
@@ -184,15 +158,14 @@ pub async fn resources(
         }
     };
 
-    println!("Sending OK");
     HttpResponse::Ok().body(answer_string)
 }
 
-pub async fn get_resources_endpoint(
+pub async fn get_resources(
     body: web::Bytes,
     path: web::Path<String>,
     webrtc_api: web::Data<Arc<Mutex<API>>>,
-    media_endpoints_data: web::Data<Arc<Mutex<MediaEndpoints>>>,
+    media_endpoints_data: web::Data<Arc<Mutex<MediaResources>>>,
 ) -> HttpResponse {
     let sdp_str = String::from_utf8(Vec::from(body)).unwrap();
 
@@ -217,8 +190,6 @@ pub async fn get_resources_endpoint(
             return HttpResponse::InternalServerError().body("Failed to create peer connection");
         }
     });
-
-    let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(1);
 
     let sdp_json = json!({
         "type": "offer",
@@ -253,42 +224,37 @@ pub async fn get_resources_endpoint(
 
     let rtp_sender = peer_connection
         .add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal + Send + Sync>)
-        .await.unwrap();
+        .await;
 
-    let peer_connection_cl = peer_connection.clone();
     let media_endpoints_data_1 = media_endpoints_data.clone();
+    let path_1 = Arc::new(path);
     peer_connection.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
         println!("Peer Connection State has changed: {s}");
 
         if s == RTCPeerConnectionState::Failed {
-            // Wait until PeerConnection has had no network activity for 30 seconds or another failure. It may be reconnected using an ICE Restart.
-            // Use webrtc.PeerConnectionStateDisconnected if you are interested in detecting faster timeout.
-            // Note that the PeerConnection may come back from PeerConnectionStateDisconnected.
             println!("Peer Connection has gone to failed exiting");
-            let _ = done_tx.try_send(());
         }
 
-        let rtp_sender_1 = video_track.clone();
+        let path_2 = path_1.clone();
+        let video_track_1 = video_track.clone();
 
-        let peer_connection_cl_1 = peer_connection_cl.clone();
         let media_endpoints_data_2 = media_endpoints_data_1.clone();
 
         Box::pin(async move {
             if s == RTCPeerConnectionState::Connected {
                 let media_endpoints = media_endpoints_data_2.lock().await;
 
-                let rtp_sender_2 = rtp_sender_1.clone();
+                let video_track_2 = video_track_1.clone();
 
-                let mut media_endpoint = media_endpoints.media_endpoints.get("aaaa").unwrap();
-
-                let mut locked_media_endpoint = media_endpoint.lock().await;
-
-                let media_observer = MediaObserver::new(
-                    peer_connection_cl_1.clone(),
-                    rtp_sender_2.clone(),
-                );
-
-                locked_media_endpoint.observers.push(media_observer);
+                // let mut media_endpoint = media_endpoints.media_endpoints.get(path_2.as_str()).unwrap();
+                //
+                // let mut locked_media_endpoint = media_endpoint.lock().await;
+                //
+                // let media_observer = MediaObserver::new(
+                //     video_track_2
+                // );
+                //
+                // locked_media_endpoint.observers.push(media_observer);
             }
         })
     }));

@@ -1,5 +1,5 @@
 mod health_check;
-mod resources;
+mod api;
 
 pub use health_check::*;
-pub use resources::*;
+pub use api::*;
