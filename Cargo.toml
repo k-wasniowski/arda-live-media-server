@@ -26,4 +26,4 @@ tracing-log = "0.1"
 secrecy = { version = "0.8", features = ["serde"] }
 tracing-actix-web = "0.7.2"
 serde-aux = "4.1.2"
-webrtc = "0.6.0"
+webrtc = "0.7.1"

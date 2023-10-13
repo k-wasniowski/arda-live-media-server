@@ -30,15 +30,11 @@ impl MediaObserver {
 impl IMediaObserver for MediaObserver {
     fn on_frame(&self, packet: &Packet) {
         println!("I got frame !!!");
-
-        //let transceivers = self.peer_connection.get_transceivers().await;
-
-        //transceivers.
     }
 }
 
 pub struct MediaPublisher {
-    pub observers: Vec<MediaObserver>,
+    observers: Vec<MediaObserver>,
 }
 
 impl MediaPublisher {
@@ -50,5 +46,9 @@ impl MediaPublisher {
                 }
             )
         )
+    }
+
+    pub fn on_frame(&self, packet: Packet) {
+        println!("I got frame !!!");
     }
 }

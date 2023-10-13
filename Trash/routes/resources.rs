@@ -3,15 +3,12 @@ use std::time::Duration;
 use actix_web::{web, HttpResponse};
 use tokio::sync::Mutex;
 use webrtc::api::interceptor_registry::register_default_interceptors;
-use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_VP8};
+use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_AV1, MIME_TYPE_VP8};
 use webrtc::api::{API, APIBuilder};
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_server::RTCIceServer;
-use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::peer_connection::{math_rand_alpha, RTCPeerConnection};
-use webrtc::peer_connection::offer_answer_options::RTCAnswerOptions;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use serde_json::{Result, Value};
@@ -32,6 +29,8 @@ pub async fn resources(
     webrtc_api: web::Data<Arc<Mutex<API>>>,
     media_endpoints_data: web::Data<Arc<Mutex<MediaEndpoints>>>,
 ) -> HttpResponse {
+    println!("Got request on path - {}", path);
+
     let sdp_str = String::from_utf8(Vec::from(body)).unwrap();
 
     println!("{}", sdp_str);
@@ -115,12 +114,11 @@ pub async fn resources(
 
     let media_publisher = MediaPublisher::new();
 
-    media_endpoints.media_endpoints.insert(String::from("aaaa"), media_publisher.clone());
+    media_endpoints.media_endpoints.insert(path.to_string(), media_publisher.clone());
     let tr = peer_connection.get_transceivers().await;
 
     let pc = Arc::downgrade(&peer_connection);
-    peer_connection.on_track(Box::new(move |track, _| {
-        let video_track = track.unwrap();
+    peer_connection.on_track(Box::new(move |video_track, _, _| {
         let media_publisher_2 = media_publisher.clone();
         let media_ssrc = video_track.ssrc();
         let pc2 = pc.clone();
@@ -137,14 +135,7 @@ pub async fn resources(
 
                 let locked_media_publisher = media_publisher_3.lock().await;
 
-                for x in &locked_media_publisher.observers {
-                    println!("Writting");
-                    let video_track = &x.video_track;
-
-                    if let Err(err) = video_track.write_rtp(&rtp_packet.0).await {
-                        println!("video_track write err: {err}");
-                    }
-                }
+                locked_media_publisher.on_frame(rtp_packet.0);
             }
         });
 
@@ -177,7 +168,7 @@ pub async fn resources(
 
     let _ = gather_complete.recv().await;
 
-    let mut answer_string = match peer_connection.local_description().await {
+    let answer_string = match peer_connection.local_description().await {
         None => { return HttpResponse::InternalServerError().finish(); }
         Some(answer) => {
             String::from(answer.sdp.as_str())
@@ -287,8 +278,6 @@ pub async fn get_resources_endpoint(
                     peer_connection_cl_1.clone(),
                     rtp_sender_2.clone(),
                 );
-
-                locked_media_endpoint.observers.push(media_observer);
             }
         })
     }));
@@ -310,7 +299,7 @@ pub async fn get_resources_endpoint(
         })
     }));
 
-    peer_connection.on_track(Box::new(move |track, _| {
+    peer_connection.on_track(Box::new(move |track, _, _| {
         println!("HERE Track on received!!!!!!!!!!!!!");
         Box::pin(async move {
             println!("HERE Track on received!!!!!!!!!!!!!");
@@ -319,22 +308,34 @@ pub async fn get_resources_endpoint(
 
     let remote_sdp = match serde_json::from_str::<RTCSessionDescription>(&sdp_json.to_string()) {
         Ok(x) => x,
-        Err(_) => { return HttpResponse::InternalServerError().body("Failed to parse sdp"); }
+        Err(error) => {
+            println!("Successfully to parse remote sdp: {:?}", error);
+            return HttpResponse::InternalServerError().body("Failed to parse sdp");
+        }
     };
 
     match peer_connection.set_remote_description(remote_sdp).await {
         Ok(_) => { println!("Successfully set remote description"); }
-        Err(_) => { return HttpResponse::InternalServerError().finish(); }
+        Err(error) => {
+            println!("Successfully to set remote sdp: {:?}", error);
+            return HttpResponse::InternalServerError().finish();
+        }
     };
 
     let answer = match peer_connection.create_answer(None).await {
         Ok(answer) => answer,
-        Err(_) => { return HttpResponse::InternalServerError().finish(); }
+        Err(error) => {
+            println!("Failed to create answer: {:?}", error);
+            return HttpResponse::InternalServerError().finish();
+        }
     };
 
     match peer_connection.set_local_description(answer).await {
         Ok(_) => { println!("Successfully set local description"); }
-        Err(_) => { return HttpResponse::InternalServerError().finish(); }
+        Err(error) => {
+            println!("Failed to set local description: {:?}", error);
+            return HttpResponse::InternalServerError().finish();
+        }
     };
 
     let mut gather_complete = peer_connection.gathering_complete_promise().await;
