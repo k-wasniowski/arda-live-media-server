@@ -24,17 +24,17 @@ async fn main() -> std::io::Result<()> {
         settings.application.host, settings.application.port
     );
 
+    let media_server = media_server_startup::run();
+
     let listener = TcpListener::bind(address)?;
 
-    let http_server_startup_result = http_server_startup::run(listener);
+    let http_server_startup_result = http_server_startup::run(listener, media_server);
     let http_server = match http_server_startup_result {
         Ok(server) => server,
         Err(e) => {
             return Err(std::io::Error::new(std::io::ErrorKind::Other, "Failed to start HTTP server."));
         }
     };
-
-    media_server_startup::run();
 
     http_server.await
 }

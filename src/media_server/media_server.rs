@@ -4,7 +4,7 @@ use tokio::sync::Mutex;
 use crate::media_server::generic_rtsp_client::GenericRtspClient;
 
 pub struct MediaServer {
-    generic_rtsp_client: GenericRtspClient,
+    pub generic_rtsp_client: GenericRtspClient,
 }
 
 impl MediaServer {
